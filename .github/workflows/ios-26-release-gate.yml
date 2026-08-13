@@ -1,0 +1,125 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: iPhone release gate (macOS 26)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-26-release-gate
+  cancel-in-progress: false
+
+env:
+  MOBILE_SHA: 1fc431dce3659720958c39085de44b12d9d5eabc
+  TOKEN_KIT_SHA: ad72cec20dc7aaebc8c370fdf4945fb4de04b266
+  PAPERCUP_SHA: ffc6da5355a34d9652538fcbe1f64508e41191cf
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  release-gate:
+    name: Exact-SHA iPhone release gate
+    runs-on: macos-26
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - name: Checkout private mobile source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Papercusp/papercup-rust-mobile
+          ref: ${{ env.MOBILE_SHA }}
+          ssh-key: ${{ secrets.MOBILE_DEPLOY_KEY }}
+          path: app
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned token kit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Papercusp/token-kit
+          ref: ${{ env.TOKEN_KIT_SHA }}
+          ssh-key: ${{ secrets.TOKEN_KIT_DEPLOY_KEY }}
+          path: app/libs/token-kit
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned Papercusp design tokens
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: Papercusp/papercup
+          ref: ${{ env.PAPERCUP_SHA }}
+          ssh-key: ${{ secrets.PAPERCUP_DEPLOY_KEY }}
+          path: app/ci/papercup
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify immutable source revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$MOBILE_SHA"
+          test "$(git -C libs/token-kit rev-parse HEAD)" = "$TOKEN_KIT_SHA"
+          test "$(git -C ci/papercup rev-parse HEAD)" = "$PAPERCUP_SHA"
+
+      - name: Inspect current Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun simctl list runtimes
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: app
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          brew list swiftformat >/dev/null 2>&1 || brew install swiftformat
+
+      - name: Verify design-token drift
+        shell: bash
+        env:
+          PAPERCUP_DESIGN_TOKENS_DIR: ${{ github.workspace }}/app/ci/papercup/design-tokens
+          REQUIRE_PRIMITIVES_SOURCE: "1"
+        run: npm run tokens:check
+
+      - name: Build iOS core and Xcode project
+        run: make build-ios
+
+      - name: Test iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          sim_udid="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print $2; exit}')"
+          test -n "$sim_udid"
+          PAPERCUP_IOS_SIM_UDID="$sim_udid" make test-ios
+
+      - name: Verify release contract and current SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          make test-ios-release
+          tools/build-scripts/verify-ios-release.sh --require-current-sdk
