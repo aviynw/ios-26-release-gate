@@ -109,6 +109,25 @@ jobs:
       - name: Build iOS core and Xcode project
         run: make build-ios
 
+      - name: Validate unsigned Release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd ios && xcodegen generate)
+          archive_path="$RUNNER_TEMP/Papercusp-unsigned.xcarchive"
+          xcodebuild archive \
+            -project ios/Papercup.xcodeproj \
+            -scheme Papercup \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$archive_path" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            MARKETING_VERSION=1.0.0 \
+            CURRENT_PROJECT_VERSION=1
+          test -d "$archive_path"
+          test -f "$archive_path/Info.plist"
+
       - name: Test iOS app
         shell: bash
         run: |
